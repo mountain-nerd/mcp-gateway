@@ -66,13 +66,20 @@ async def create_gateway_server(
 
     @server.read_resource()
     async def handle_read_resource(uri: Any) -> str | bytes:
-        result = await gateway.read_resource(str(uri))
-        content = result.contents[0]
-        if isinstance(content, types.TextResourceContents):
-            return content.text
-        if isinstance(content, types.BlobResourceContents):
-            return content.blob
-        return str(content)
+        try:
+            result = await gateway.read_resource(str(uri))
+        except ValueError as exc:
+            raise exc
+
+        # Handle all content parts, not just the first
+        parts: list[str] = []
+        for content in result.contents:
+            if isinstance(content, types.TextResourceContents):
+                parts.append(content.text)
+            elif isinstance(content, types.BlobResourceContents):
+                # For multi-part with blobs, return the first blob directly
+                return content.blob
+        return "\n".join(parts) if parts else ""
 
     # ── Prompt handlers ──────────────────────────────────────────────
 

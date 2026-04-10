@@ -11,6 +11,9 @@ from mcp_gateway.upstream import UpstreamManager
 
 logger = logging.getLogger(__name__)
 
+# Resource URI prefix used to namespace upstream resources
+_RESOURCE_PREFIX = "gateway://"
+
 
 class Gateway:
     """Aggregates tools/resources/prompts from upstream MCP servers
@@ -72,16 +75,32 @@ class Gateway:
 
     # ── Resources ────────────────────────────────────────────────────────
 
+    def _namespace_resource_uri(self, server_name: str, original_uri: str) -> str:
+        """Prefix a resource URI to avoid cross-server collisions."""
+        return f"{_RESOURCE_PREFIX}{server_name}/{original_uri}"
+
+    def _resolve_resource_uri(self, namespaced_uri: str) -> tuple[str, str] | None:
+        """Parse a namespaced resource URI into (server_name, original_uri)."""
+        if not namespaced_uri.startswith(_RESOURCE_PREFIX):
+            return None
+        rest = namespaced_uri[len(_RESOURCE_PREFIX):]
+        slash = rest.find("/")
+        if slash < 0:
+            return None
+        server_name = rest[:slash]
+        original_uri = rest[slash + 1:]
+        return server_name, original_uri
+
     def list_resources(self) -> list[types.Resource]:
-        """Return all resources from all upstream servers."""
+        """Return all resources from all upstream servers, namespaced."""
         resources: list[types.Resource] = []
         for name, server in self.upstream.servers.items():
             if not server.connected:
                 continue
             for resource in server.resources:
-                # Resources are identified by URI, so we prefix the name only
+                namespaced_uri = self._namespace_resource_uri(name, str(resource.uri))
                 prefixed = types.Resource(
-                    uri=resource.uri,
+                    uri=namespaced_uri,
                     name=f"[{name}] {resource.name or ''}",
                     description=resource.description,
                     mimeType=resource.mimeType,
@@ -97,7 +116,7 @@ class Gateway:
                 continue
             for tmpl in server.resource_templates:
                 prefixed = types.ResourceTemplate(
-                    uriTemplate=tmpl.uriTemplate,
+                    uriTemplate=f"{_RESOURCE_PREFIX}{name}/{tmpl.uriTemplate}",
                     name=f"[{name}] {tmpl.name or ''}",
                     description=tmpl.description,
                     mimeType=tmpl.mimeType,
@@ -107,10 +126,16 @@ class Gateway:
 
     async def read_resource(self, uri: str) -> types.ReadResourceResult:
         """Route a resource read to the correct upstream server."""
-        server = self.upstream.get_server_for_resource(uri)
-        if server is None:
-            raise ValueError(f"Unknown resource: {uri}")
-        return await server.read_resource(uri)
+        resolved = self._resolve_resource_uri(uri)
+        if resolved is None:
+            raise ValueError(f"Unknown resource URI format: {uri}")
+
+        server_name, original_uri = resolved
+        server = self.upstream.servers.get(server_name)
+        if server is None or not server.connected:
+            raise ValueError(f"Server '{server_name}' not found or disconnected")
+
+        return await server.read_resource(original_uri)
 
     # ── Prompts ──────────────────────────────────────────────────────────
 

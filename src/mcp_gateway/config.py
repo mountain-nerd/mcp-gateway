@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ToolFilterConfig(BaseModel):
@@ -16,18 +17,6 @@ class ToolFilterConfig(BaseModel):
     exclude: list[str] | None = None
     resources: bool = True
     prompts: bool = True
-
-
-class SamplingConfig(BaseModel):
-    """Per-server MCP sampling configuration."""
-
-    enabled: bool = True
-    model: str | None = None
-    max_tokens_cap: int = 4096
-    timeout: float = 30.0
-    max_rpm: int = 10
-    max_tool_rounds: int = 5
-    allowed_models: list[str] = Field(default_factory=list)
 
 
 class UpstreamServerConfig(BaseModel):
@@ -50,8 +39,18 @@ class UpstreamServerConfig(BaseModel):
     # Tool filtering
     tools: ToolFilterConfig = Field(default_factory=ToolFilterConfig)
 
-    # Sampling
-    sampling: SamplingConfig = Field(default_factory=SamplingConfig)
+    @model_validator(mode="after")
+    def _validate_transport(self) -> UpstreamServerConfig:
+        if self.command and self.url:
+            raise ValueError(
+                "Server cannot have both 'command' (stdio) and 'url' (http) — pick one"
+            )
+        if not self.command and not self.url:
+            if self.enabled:
+                raise ValueError(
+                    "Server must have either 'command' (stdio) or 'url' (http)"
+                )
+        return self
 
     @property
     def transport_type(self) -> str:
@@ -60,6 +59,9 @@ class UpstreamServerConfig(BaseModel):
         if self.url is not None:
             return "http"
         raise ValueError("Server must have either 'command' (stdio) or 'url' (http)")
+
+
+_SERVER_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
 
 
 class GatewayConfig(BaseModel):
@@ -71,8 +73,23 @@ class GatewayConfig(BaseModel):
     name: str = "mcp-gateway"
     version: str = "0.1.0"
     log_level: str = "info"
+    max_sessions: int = 100
 
     mcp_servers: dict[str, UpstreamServerConfig] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_server_names(self) -> GatewayConfig:
+        for name in self.mcp_servers:
+            if "__" in name:
+                raise ValueError(
+                    f"Server name '{name}' must not contain '__' "
+                    f"(reserved as namespace separator)"
+                )
+            if not _SERVER_NAME_RE.match(name):
+                raise ValueError(
+                    f"Server name '{name}' must match [a-zA-Z0-9][a-zA-Z0-9_-]*"
+                )
+        return self
 
 
 def load_config(path: str | Path) -> GatewayConfig:

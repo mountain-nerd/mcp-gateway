@@ -55,7 +55,7 @@ class UpstreamServer:
             self.resources = result.resources
             logger.info("Server %s: discovered %d resources", self.name, len(self.resources))
         except Exception:
-            logger.debug("Server %s does not support resources", self.name)
+            logger.warning("Server %s: failed to list resources", self.name, exc_info=True)
             self.resources = []
 
         try:
@@ -74,7 +74,7 @@ class UpstreamServer:
             self.prompts = result.prompts
             logger.info("Server %s: discovered %d prompts", self.name, len(self.prompts))
         except Exception:
-            logger.debug("Server %s does not support prompts", self.name)
+            logger.warning("Server %s: failed to list prompts", self.name, exc_info=True)
             self.prompts = []
 
     async def refresh_all(self) -> None:
@@ -121,6 +121,7 @@ class UpstreamManager:
 
     def __init__(self) -> None:
         self.servers: dict[str, UpstreamServer] = {}
+        self._configs: dict[str, UpstreamServerConfig] = {}
         self._exit_stack = AsyncExitStack()
         self._tool_change_callbacks: list[Any] = []
 
@@ -188,6 +189,7 @@ class UpstreamManager:
 
     async def connect_all(self, configs: dict[str, UpstreamServerConfig]) -> None:
         """Connect to all configured upstream servers."""
+        self._configs = configs
         tasks = []
         for name, config in configs.items():
             if not config.enabled:
@@ -204,7 +206,17 @@ class UpstreamManager:
             await self._notify_tool_change()
 
     async def refresh_all(self) -> None:
-        """Refresh all connected servers."""
+        """Refresh all connected servers and attempt to reconnect dead ones."""
+        # Attempt reconnection for disconnected servers
+        for name, config in self._configs.items():
+            if not config.enabled:
+                continue
+            server = self.servers.get(name)
+            if server and not server.connected:
+                logger.info("Attempting reconnection to %s", name)
+                await self.connect(name, config)
+
+        # Refresh all connected servers
         tasks = [
             s.refresh_all()
             for s in self.servers.values()
@@ -224,16 +236,6 @@ class UpstreamManager:
                 original_name = namespaced_name[len(prefix):]
                 if any(t.name == original_name for t in server.tools):
                     return server, original_name
-        return None
-
-    def get_server_for_resource(self, uri: str) -> UpstreamServer | None:
-        """Find which server owns a given resource URI."""
-        for server in self.servers.values():
-            if not server.connected:
-                continue
-            for r in server.resources:
-                if str(r.uri) == uri:
-                    return server
         return None
 
     def get_server_for_prompt(self, namespaced_name: str) -> tuple[UpstreamServer, str] | None:

@@ -31,11 +31,14 @@ class MCPEndpoint:
     """ASGI app managing MCP sessions — delegates directly to transports
     so SSE streaming works correctly."""
 
-    def __init__(self) -> None:
+    def __init__(self, max_sessions: int = 100) -> None:
         self._sessions: dict[str, StreamableHTTPServerTransport] = {}
+        self._session_tasks: dict[str, asyncio.Task] = {}
+        self._session_ready: dict[str, asyncio.Event] = {}
         self._server: Server | None = None
         self._init_options: InitializationOptions | None = None
         self._lock = asyncio.Lock()
+        self._max_sessions = max_sessions
 
     def set_server(self, server: Server, init_options: InitializationOptions) -> None:
         self._server = server
@@ -55,13 +58,13 @@ class MCPEndpoint:
             await self._handle_delete(session_id, send)
             return
 
-        # Existing session → delegate to its transport
+        # Existing session -> delegate to its transport
         if session_id and session_id in self._sessions:
             transport = self._sessions[session_id]
             await transport.handle_request(scope, receive, send)
             return
 
-        # New POST → create session
+        # New POST -> create session
         if method == "POST":
             await self._handle_new_session(scope, receive, send)
             return
@@ -76,37 +79,67 @@ class MCPEndpoint:
     async def _handle_new_session(
         self, scope: Scope, receive: Receive, send: Send
     ) -> None:
-        new_session_id = uuid.uuid4().hex
-        transport = StreamableHTTPServerTransport(
-            mcp_session_id=new_session_id,
-            is_json_response_enabled=False,
-        )
-
         async with self._lock:
+            if len(self._sessions) >= self._max_sessions:
+                await _send_json(send, 503, {
+                    "error": f"Max sessions ({self._max_sessions}) reached"
+                })
+                return
+
+            new_session_id = uuid.uuid4().hex
+            transport = StreamableHTTPServerTransport(
+                mcp_session_id=new_session_id,
+                is_json_response_enabled=False,
+            )
             self._sessions[new_session_id] = transport
 
-        # Start the server processing loop in the background
-        asyncio.create_task(self._run_server_session(transport, new_session_id))
+            # Create an event for synchronization — no more sleep() race
+            ready_event = asyncio.Event()
+            self._session_ready[new_session_id] = ready_event
 
-        # Give connect() time to set up read/write streams
-        await asyncio.sleep(0.01)
+            task = asyncio.create_task(
+                self._run_server_session(transport, new_session_id, ready_event)
+            )
+            self._session_tasks[new_session_id] = task
+
+        # Wait for connect() to establish streams (with timeout)
+        try:
+            await asyncio.wait_for(ready_event.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.error("Session %s: connect() timed out", new_session_id)
+            self._sessions.pop(new_session_id, None)
+            self._session_tasks.pop(new_session_id, None)
+            self._session_ready.pop(new_session_id, None)
+            await _send_json(send, 503, {"error": "Session initialization timed out"})
+            return
 
         await transport.handle_request(scope, receive, send)
 
     async def _run_server_session(
-        self, transport: StreamableHTTPServerTransport, session_id: str
+        self,
+        transport: StreamableHTTPServerTransport,
+        session_id: str,
+        ready_event: asyncio.Event,
     ) -> None:
         try:
             async with transport.connect() as (read_stream, write_stream):
+                # Signal that streams are ready
+                ready_event.set()
                 await self._server.run(
                     read_stream,
                     write_stream,
                     self._init_options,
                 )
+        except asyncio.CancelledError:
+            logger.debug("Session %s cancelled", session_id)
         except Exception:
             logger.exception("Session %s error", session_id)
         finally:
+            # Ensure event is set even on failure so request doesn't hang
+            ready_event.set()
             self._sessions.pop(session_id, None)
+            self._session_tasks.pop(session_id, None)
+            self._session_ready.pop(session_id, None)
             logger.debug("Session %s closed", session_id)
 
     async def _handle_delete(self, session_id: str | None, send: Send) -> None:
@@ -114,17 +147,33 @@ class MCPEndpoint:
             await _send_json(send, 404, {"error": "Session not found"})
             return
         transport = self._sessions.pop(session_id, None)
+        task = self._session_tasks.pop(session_id, None)
+        self._session_ready.pop(session_id, None)
         if transport:
             await transport.terminate()
+        if task and not task.done():
+            task.cancel()
         await _send_json(send, 200, {"status": "terminated"})
 
     async def terminate_all(self) -> None:
-        for transport in list(self._sessions.values()):
+        """Shut down all active sessions with proper cleanup."""
+        for sid, transport in list(self._sessions.items()):
             try:
                 await transport.terminate()
             except Exception:
-                pass
+                logger.warning("Failed to terminate session %s", sid, exc_info=True)
+
+        for sid, task in list(self._session_tasks.items()):
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
         self._sessions.clear()
+        self._session_tasks.clear()
+        self._session_ready.clear()
 
 
 async def _send_json(send: Send, status: int, body: dict) -> None:
@@ -144,12 +193,8 @@ async def _send_json(send: Send, status: int, body: dict) -> None:
 
 
 def create_app(config: GatewayConfig) -> Starlette:
-    """Create the Starlette ASGI application for the MCP Gateway.
-
-    The MCP endpoint is wired as a raw ASGI app via Mount-less routing
-    so SSE streaming works correctly. Health/reload are normal Starlette routes.
-    """
-    mcp_endpoint = MCPEndpoint()
+    """Create the Starlette ASGI application for the MCP Gateway."""
+    mcp_endpoint = MCPEndpoint(max_sessions=config.max_sessions)
     gateway_ref: dict[str, Any] = {}
 
     @asynccontextmanager
@@ -172,11 +217,12 @@ def create_app(config: GatewayConfig) -> Starlette:
             try:
                 await ctx.__aexit__(None, None, None)
             except Exception:
-                logger.debug("Shutdown cleanup exception (safe to ignore)")
+                logger.warning("Shutdown cleanup error", exc_info=True)
 
     async def health(request: Request) -> JSONResponse:
         gw = gateway_ref.get("gw")
         servers = {}
+        all_connected = True
         if gw:
             for name, srv in gw.upstream.servers.items():
                 servers[name] = {
@@ -185,8 +231,13 @@ def create_app(config: GatewayConfig) -> Starlette:
                     "resources": len(srv.resources),
                     "prompts": len(srv.prompts),
                 }
+                if not srv.connected:
+                    all_connected = False
+
+        status = "ok" if all_connected else "degraded"
         return JSONResponse({
-            "status": "ok",
+            "status": status,
+            "sessions": len(mcp_endpoint._sessions),
             "servers": servers,
             "total_tools": sum(s.get("tools", 0) for s in servers.values()),
         })
@@ -198,26 +249,32 @@ def create_app(config: GatewayConfig) -> Starlette:
         tools = gw.list_tools() if gw else []
         return JSONResponse({"status": "reloaded", "tools": len(tools)})
 
-    # Build an outer ASGI app that routes /mcp to the MCP endpoint
-    # and everything else to Starlette for health/reload
     starlette_app = Starlette(
         routes=[
             Route("/health", health, methods=["GET"]),
             Route("/reload", reload, methods=["POST"]),
         ],
         lifespan=lifespan,
-        middleware=[
-            Middleware(
-                CORSMiddleware,
-                allow_origins=["*"],
-                allow_methods=["GET", "POST", "DELETE"],
-                allow_headers=["Content-Type", "Accept", "Mcp-Session-Id"],
-                expose_headers=["Mcp-Session-Id"],
-            ),
-        ],
     )
 
     mcp_path = config.path.rstrip("/")
+
+    # Wrap the MCP endpoint in CORS middleware so it actually applies
+    cors_mcp = CORSMiddleware(
+        app=_ASGICallable(mcp_endpoint.handle),
+        allow_origins=["*"],
+        allow_methods=["GET", "POST", "DELETE"],
+        allow_headers=["Content-Type", "Accept", "Mcp-Session-Id"],
+        expose_headers=["Mcp-Session-Id"],
+    )
+
+    # Also wrap Starlette routes in the same CORS policy
+    cors_rest = CORSMiddleware(
+        app=starlette_app,
+        allow_origins=["*"],
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type"],
+    )
 
     class GatewayASGI:
         """Top-level ASGI app that splits traffic between MCP and REST."""
@@ -229,8 +286,18 @@ def create_app(config: GatewayConfig) -> Starlette:
 
             path = scope.get("path", "")
             if path == mcp_path or path == mcp_path + "/":
-                await mcp_endpoint.handle(scope, receive, send)
+                await cors_mcp(scope, receive, send)
             else:
-                await starlette_app(scope, receive, send)
+                await cors_rest(scope, receive, send)
 
     return GatewayASGI()  # type: ignore[return-value]
+
+
+class _ASGICallable:
+    """Wrap an async callable as a proper ASGI app for CORSMiddleware."""
+
+    def __init__(self, handler: Any) -> None:
+        self._handler = handler
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        await self._handler(scope, receive, send)
