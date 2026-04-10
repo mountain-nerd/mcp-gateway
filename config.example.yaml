@@ -1,0 +1,73 @@
+# MCP Gateway Configuration
+# ─────────────────────────────────────────────────────────────────────
+# The gateway aggregates multiple upstream MCP servers and exposes
+# them as a single Streamable HTTP endpoint that any MCP client
+# (OpenAI Agent SDK, Claude, Hermes, etc.) can connect to.
+
+host: "127.0.0.1"
+port: 8080
+path: "/mcp"
+name: "mcp-gateway"
+version: "0.1.0"
+log_level: "info"
+
+mcp_servers:
+  # ── Stdio transport (local process) ──────────────────────────────
+  # The gateway spawns the process and communicates via stdin/stdout.
+  filesystem:
+    command: "npx"
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/project"]
+    env:
+      NODE_ENV: "production"
+    timeout: 30
+    connect_timeout: 10
+    tools:
+      # Whitelist: only expose these tools (recommended for sensitive servers)
+      include:
+        - read_file
+        - write_file
+        - list_directory
+      resources: true
+      prompts: false
+
+  # ── HTTP transport (remote server) ───────────────────────────────
+  # Connects to an MCP server over Streamable HTTP.
+  github:
+    url: "https://mcp.github.example.com/mcp"
+    headers:
+      Authorization: "Bearer ghp_xxxxxxxxxxxxx"
+    timeout: 30
+    connect_timeout: 10
+    tools:
+      # Blacklist: expose everything except these tools
+      exclude:
+        - delete_repository
+        - delete_branch
+      resources: true
+      prompts: true
+
+  # ── Another stdio server ─────────────────────────────────────────
+  git:
+    command: "uvx"
+    args: ["mcp-server-git", "--repository", "/home/user/project"]
+    tools:
+      resources: false
+      prompts: false
+
+  # ── Disabled server (kept in config but not connected) ───────────
+  experimental:
+    command: "python"
+    args: ["-m", "my_experimental_server"]
+    enabled: false
+
+  # ── Server with sampling support ─────────────────────────────────
+  smart_assistant:
+    url: "https://assistant.internal.example.com/mcp"
+    headers:
+      Authorization: "Bearer token"
+    sampling:
+      enabled: true
+      model: "gpt-4o"
+      max_tokens_cap: 4096
+      timeout: 30
+      max_rpm: 10

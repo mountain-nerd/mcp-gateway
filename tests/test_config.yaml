@@ -1,0 +1,13 @@
+host: "127.0.0.1"
+port: 9123
+path: "/mcp"
+name: "test-gateway"
+log_level: "debug"
+
+mcp_servers:
+  echo:
+    command: "python3"
+    args: ["tests/echo_server.py"]
+    tools:
+      resources: false
+      prompts: false
