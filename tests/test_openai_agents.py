@@ -14,14 +14,20 @@ Usage:
   # Run tool discovery test (no API key needed):
   python tests/test_openai_agents.py
 
-  # Run full agent test (needs API key):
-  OPENAI_API_KEY=sk-... python tests/test_openai_agents.py --agent
+  # Run full agent test (loads key from .env):
+  python tests/test_openai_agents.py --agent
 """
 
 import argparse
 import asyncio
 import os
 import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load .env from project root
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from agents import Agent, Runner
 from agents.mcp import MCPServerStreamableHttp
