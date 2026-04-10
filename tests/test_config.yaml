@@ -1,3 +1,4 @@
+# Test config — stdio servers only (no HTTP dependency)
 host: "127.0.0.1"
 port: 9123
 path: "/mcp"
@@ -7,7 +8,22 @@ log_level: "debug"
 mcp_servers:
   echo:
     command: "python3"
-    args: ["tests/echo_server.py"]
+    args: ["examples/echo_server.py"]
+    tools:
+      resources: false
+      prompts: false
+
+  knowledge:
+    command: "python3"
+    args: ["examples/knowledge_server.py"]
+    tools:
+      include: [search]
+      resources: true
+      prompts: true
+
+  dynamic:
+    command: "python3"
+    args: ["examples/dynamic_server.py"]
     tools:
       resources: false
       prompts: false

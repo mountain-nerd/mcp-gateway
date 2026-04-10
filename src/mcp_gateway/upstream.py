@@ -8,6 +8,8 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from typing import Any
 
+import httpx
+
 from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
@@ -148,14 +150,18 @@ class UpstreamManager:
                     stdio_client(server_params)
                 )
             else:
+                http_client = httpx.AsyncClient(
+                    headers=config.headers if config.headers else None,
+                    timeout=httpx.Timeout(config.timeout, connect=config.connect_timeout),
+                )
+                self._exit_stack.push_async_callback(http_client.aclose)
                 transport = await self._exit_stack.enter_async_context(
                     streamable_http_client(
                         config.url,
-                        headers=config.headers if config.headers else None,
-                        timeout=config.connect_timeout,
+                        http_client=http_client,
                     )
                 )
-                # streamable_http_client returns (read, write, session_id)
+                # streamable_http_client returns (read, write, get_session_id)
                 transport = (transport[0], transport[1])
 
             read_stream, write_stream = transport

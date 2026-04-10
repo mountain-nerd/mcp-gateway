@@ -1,8 +1,11 @@
-# MCP Gateway Configuration
+# MCP Gateway — Example Configuration
 # ─────────────────────────────────────────────────────────────────────
-# The gateway aggregates multiple upstream MCP servers and exposes
-# them as a single Streamable HTTP endpoint that any MCP client
-# (OpenAI Agent SDK, Claude, Hermes, etc.) can connect to.
+# Wires the four example servers to demonstrate every gateway pattern.
+#
+# Quick start:
+#   1. Start the HTTP calc server:  python examples/http_calc_server.py
+#   2. Start the gateway:           mcp-gateway -c config.example.yaml
+#   3. Connect any MCP client to:   http://127.0.0.1:8080/mcp
 
 host: "127.0.0.1"
 port: 8080
@@ -12,62 +15,50 @@ version: "0.1.0"
 log_level: "info"
 
 mcp_servers:
-  # ── Stdio transport (local process) ──────────────────────────────
-  # The gateway spawns the process and communicates via stdin/stdout.
-  filesystem:
-    command: "npx"
-    args: ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/project"]
-    env:
-      NODE_ENV: "production"
-    timeout: 30
-    connect_timeout: 10
-    tools:
-      # Whitelist: only expose these tools (recommended for sensitive servers)
-      include:
-        - read_file
-        - write_file
-        - list_directory
-      resources: true
-      prompts: false
 
-  # ── HTTP transport (remote server) ───────────────────────────────
-  # Connects to an MCP server over Streamable HTTP.
-  github:
-    url: "https://mcp.github.example.com/mcp"
-    headers:
-      Authorization: "Bearer ghp_xxxxxxxxxxxxx"
-    timeout: 30
-    connect_timeout: 10
-    tools:
-      # Blacklist: expose everything except these tools
-      exclude:
-        - delete_repository
-        - delete_branch
-      resources: true
-      prompts: true
-
-  # ── Another stdio server ─────────────────────────────────────────
-  git:
-    command: "uvx"
-    args: ["mcp-server-git", "--repository", "/home/user/project"]
+  # ── 1. Echo (stdio) ─────────────────────────────────────────────
+  # Pattern: basic stdio transport, tools only, no filtering
+  echo:
+    command: "python3"
+    args: ["examples/echo_server.py"]
     tools:
       resources: false
       prompts: false
 
-  # ── Disabled server (kept in config but not connected) ───────────
-  experimental:
-    command: "python"
-    args: ["-m", "my_experimental_server"]
-    enabled: false
+  # ── 2. Knowledge (stdio) ────────────────────────────────────────
+  # Pattern: resources + prompts enabled, whitelist filtering on tools
+  knowledge:
+    command: "python3"
+    args: ["examples/knowledge_server.py"]
+    tools:
+      include: [search]          # only expose the search tool
+      resources: true            # expose resources (articles)
+      prompts: true              # expose prompts (summarize, explain)
 
-  # ── Server with sampling support ─────────────────────────────────
-  smart_assistant:
-    url: "https://assistant.internal.example.com/mcp"
-    headers:
-      Authorization: "Bearer token"
-    sampling:
-      enabled: true
-      model: "gpt-4o"
-      max_tokens_cap: 4096
-      timeout: 30
-      max_rpm: 10
+  # ── 3. Calc (HTTP) ──────────────────────────────────────────────
+  # Pattern: HTTP upstream transport, blacklist filtering
+  # Requires: python examples/http_calc_server.py  (runs on port 8081)
+  calc:
+    url: "http://127.0.0.1:8081/mcp"
+    timeout: 10
+    connect_timeout: 5
+    tools:
+      exclude: [divide]          # block the divide tool
+      resources: false
+      prompts: false
+
+  # ── 4. Dynamic (stdio) ──────────────────────────────────────────
+  # Pattern: dynamic tool discovery (tools rotate every 30s)
+  dynamic:
+    command: "python3"
+    args: ["examples/dynamic_server.py"]
+    tools:
+      resources: false
+      prompts: false
+
+  # ── 5. Disabled (stdio) ─────────────────────────────────────────
+  # Pattern: server kept in config but not connected
+  disabled_example:
+    command: "python3"
+    args: ["examples/echo_server.py"]
+    enabled: false

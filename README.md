@@ -25,9 +25,9 @@ own agent framework.
 │              │     │  Filtering    │   │   └──────────────────┘
 └──────────────┘     └───────────────┘   │
                                          │   ┌──────────────────┐
-  Streamable HTTP        /mcp            └──▶│ MCP Server       │
-  ◀──────────────▶  ◀────────────▶           │ (git)            │
-    downstream          gateway              │ [stdio]          │
+  Streamable HTTP          /mcp          └──▶│ MCP Server       │
+◀──────────────▶       ◀────────────▶        │ (git)            │
+    downstream            gateway            │ [stdio]          │
                                              └──────────────────┘
 ```
 
