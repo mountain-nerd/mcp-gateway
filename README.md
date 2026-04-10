@@ -90,10 +90,10 @@ Example: `filesystem__read_file`, `github__create_issue`.
 | Endpoint   | Method       | Description                     |
 |------------|--------------|---------------------------------|
 | `/mcp`     | POST/GET/DEL | MCP Streamable HTTP endpoint    |
-| `/health`  | GET          | Server status and tool counts   |
-| `/reload`  | POST         | Refresh upstream tool lists     |
+| `/health`  | GET          | Status (`ok`/`degraded`), sessions, tool counts |
+| `/reload`  | POST         | Refresh tools and reconnect dead upstreams |
 
-## Supported Patterns (Hermes-compatible)
+## Supported Patterns (Hermes-inspired)
 
 - [x] Stdio upstream transport
 - [x] HTTP upstream transport (Streamable HTTP)
@@ -103,7 +103,8 @@ Example: `filesystem__read_file`, `github__create_issue`.
 - [x] Prompt aggregation with per-server toggle
 - [x] Dynamic tool discovery (`notifications/tools/list_changed`)
 - [x] Per-server enable/disable
-- [x] Sampling configuration
 - [x] Connection/call timeouts
-- [x] Health check endpoint
-- [x] Hot reload (`/reload`)
+- [x] Session limits (`max_sessions`)
+- [x] Health check with degraded status
+- [x] Hot reload with upstream reconnection (`/reload`)
+- [x] Config validation (transport conflicts, namespace collisions)
